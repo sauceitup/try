@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Zigzag stack — tracks</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #0b0b0d;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+  #island {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 110px;
+    height: 30px;
+    background: #000;
+    border-radius: 16px;
+    z-index: 50;
+    pointer-events: none;
+  }
+  canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  #hint {
+    position: absolute;
+    bottom: 24px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: rgba(255,255,255,0.4);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="island"></div>
+    <canvas id="cv"></canvas>
+    <div id="hint">1 палец — скролл · пинч — сильнее изгиб змейки</div>
+  </div>
+
+<script>
+(function(){
+  const stage = document.getElementById('stage');
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  let W, H, DPR;
+
+  function resize(){
+    DPR = window.devicePixelRatio || 1;
+    W = stage.clientWidth;
+    H = stage.clientHeight;
+    cv.width = Math.max(1, Math.floor(W * DPR));
+    cv.height = Math.max(1, Math.floor(H * DPR));
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  resize();
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resize, 100);
+  });
+
+  // ---- Тестовые данные треков ----
+  const palette = ['#7F77DD','#1D9E75','#D85A30','#D4537E','#378ADD','#BA7517','#639922',
+                    '#C9457B','#3E9C9C','#A33E9E','#5577D8','#D8A23E','#4FAE5E','#9E4F4F'];
+  const titles = [
+    'Falling','Lose Control','Outta Here','Better Not','All of Me','Anything','Crave You',
+    'New Rules','Delilah','Baby again..','Twin Flame','Summer in NY','Take It Slow','Big Wave',
+    'Feeling','Be Like You','Remix Not','As If Like','Runaway','New Year','Slower','Daylight',
+    'Heavy Signal','Fresh Again','Midnight','Echoes','Closer','Afterglow','Static','Tideline'
+  ];
+  const artists = [
+    'Otpa, Whethan','Lous the Child','RL Grime','Louis the Child','Big Gigantic','Alison Wonderland',
+    'Flight Facilities','Dua Lipa','Fred again..','Fred again..','Kaytranada','Soft Tukker',
+    'Channel Tres','Big Wild','Chris Avantgarde','Big Gigantic','Lane 8','RÜFÜS DU SOL',
+    'ODESZA','Bonobo','Tycho','Disclosure','Jamie xx','Caribou','Bicep','Mura Masa'
+  ];
+
+  const N = 60;
+  const tracks = [];
+  for (let i = 0; i < N; i++) {
+    tracks.push({
+      color: palette[i % palette.length],
+      title: titles[i % titles.length],
+      artist: artists[i % artists.length]
+    });
+  }
+
+  // ---- Адаптивный размер: крупные сверху, мелкие снизу, всегда (зависит от
+  // позиции на ЭКРАНЕ, а не от индекса — так что при скролле тоже всё корректно) ----
+  const TOP_W = 220, TOP_H = 56;
+  const BOTTOM_W = 30, BOTTOM_H = 13;
+  const TOP_Y = 80;             // y верхней крупной карточки на экране
+  const HORIZON_Y_FRAC = 0.84;  // доля высоты экрана, где карточки максимально мелкие
+
+  function sizeForDepth(depth){ // depth: 0 (верх, крупно) .. 1 (горизонт, мелко)
+    const t = depth; // можно завести ease, но линейного достаточно — depth уже идёт по экранной Y
+    return {
+      w: TOP_W + (BOTTOM_W - TOP_W) * t,
+      h: TOP_H + (BOTTOM_H - TOP_H) * t
+    };
+  }
+
+  // ---- Путь по Y: шаг между карточками растёт вниз И гарантированно
+  // не меньше высоты карточки в этой точке (чтобы не накладывались) ----
+  // Решаем итеративно: идём по списку, на каждом шаге считаем высоту карточки
+  // ТЕКУЩЕЙ depth и берём шаг = max(желаемый растущий шаг, height*1.08 запас).
+  const STEP_BASE = 26;
+  const STEP_GROWTH = 70; // насколько сильно растёт желаемый шаг к низу (квадратично)
+
+  function depthFromScreenY(y){
+    const horizonY = H * HORIZON_Y_FRAC;
+    return Math.max(0, Math.min(1, (y - TOP_Y) / (horizonY - TOP_Y)));
+  }
+
+  // Пересчитываем baseY (накопленную позицию вдоль пути от верха) каждый кадр,
+  // т.к. зависит от H (на resize) — но H меняется редко, поэтому кэшируем и
+  // помечаем "dirty" по высоте экрана.
+  let baseY = [];
+  let cachedH = -1;
+  function rebuildBaseY(){
+    baseY = [0];
+    for (let i = 1; i < N; i++) {
+      const frac = (i - 1) / (N - 1);
+      // желаемый (растущий) шаг, без учёта анти-перекрытия
+      const desired = STEP_BASE + frac * frac * STEP_GROWTH;
+      // высота карточки в точке предыдущего элемента (по текущему baseY[i-1])
+      const prevScreenY = TOP_Y + baseY[i - 1];
+      const depth = depthFromScreenY(prevScreenY);
+      const sz = sizeForDepth(depth);
+      // минимальный шаг = высота карточки + запас 18%, чтобы соседи точно не перекрывались
+      const minStep = sz.h * 1.18;
+      baseY.push(baseY[i - 1] + Math.max(desired, minStep));
+    }
+    cachedH = H;
+  }
+  rebuildBaseY();
+
+  function totalSpan(){ return baseY[N - 1]; }
+  function maxScroll(){
+    return Math.max(0, totalSpan() - (H - TOP_Y - 60));
+  }
+
+  // Per-карточное состояние для плавной интерполяции отображаемой позиции —
+  // у каждой карточки своё "текущее отрисованное" x/angle, которое каждый кадр
+  // чуть приближается (ease) к целевому положению на кривой. Это даёт мягкое
+  // "доезжание" при изменении изгиба, без скачков и без осцилляций (просто lerp).
+  const displayX = new Array(N).fill(null);
+  const displayAng = new Array(N).fill(0);
+  const POS_EASE = 0.07; // медленнее доезжают до целевой позиции — спокойнее разлёт/прилёт
+
+  // ---- Зигзаг по X — амплитуда/частота зависят от pinch-зума: разводим
+  // пальцы -> кривая изгибается СИЛЬНЕЕ и резче. ----
+  // bendAmount — ЦЕЛЕВОЕ значение (от пинча), bendAmountDisplay — то, что
+  // реально используется при отрисовке и плавно (ease) догоняет цель —
+  // так изгиб "наплывает", а не скачет, и карточки соответственно плавно
+  // уезжают на новые позиции, а не телепортируются.
+  let bendAmount = 0;
+  let bendAmountDisplay = 0;
+  const MIN_BEND = 0, MAX_BEND = 1;
+  const BEND_EASE = 0.045; // медленнее приближение к цели — разлёт/прилёт плавнее и спокойнее
+
+  // Даже в покое (bendAmount=0) путь не идеально прямой — заметная, но не
+  // развязная змейка (ориентир — умеренный изгиб колонны), чтобы обычный
+  // скролл сам по себе был "змейкой", а не строгой пирамидой сужения.
+  let organicTime = 0;
+  const ORGANIC_AMPL = 46;      // заметная базовая амплитуда покоя (была 16)
+  const ORGANIC_DRIFT_SPEED = 0.0007; // скорость медленного дрейфа формы
+
+  function curveAmplitude(){
+    // от заметного базового покачивания до сильного зигзага на максимуме пинча
+    const maxAmpl = Math.max(420, W * 0.85);
+    return ORGANIC_AMPL + bendAmountDisplay * maxAmpl;
+  }
+  function curveFreqMul(){
+    return 1 + bendAmountDisplay * 1.6;
+  }
+  function pathX(s){
+    const ampl = curveAmplitude();
+    const freq = curveFreqMul();
+    // лёгкий медленный фазовый дрейф (organicTime) даёт "плывущую" форму
+    // даже когда никто не трогает экран — она не дёргается, а перетекает
+    const a = Math.sin((s / 230) * freq + organicTime) * ampl;
+    const b = Math.sin((s / 115) * freq + 1.1 + organicTime * 1.3) * ampl * 0.22;
+    return a + b;
+  }
+
+  // ---- Скролл ----
+  let scrollOffset = 0;
+  let scrollVelocity = 0;
+  const FRICTION = 0.95; // чуть дольше "выбегает" — резвее и плавнее одновременно
+
+  // Скользящее окно последних движений пальца — нужно, чтобы скорость инерции
+  // считалась по усреднённому жесту, а не по одному последнему microevent перед
+  // pointerup. Именно последний кадр перед отпуском пальца часто содержит
+  // случайный微-рывок/притормаживание — из-за него список "отлетал обратно"
+  // даже на лёгких свайпах.
+  let velocityHistory = []; // { dy, t }
+  const VELOCITY_WINDOW_MS = 60; // усредняем по последним ~60мс движения
+
+  // ---- Указатели: drag (1 палец, скролл) + pinch (2 пальца, усиление изгиба) ----
+  const pointers = new Map();
+  let lastDragY = null;
+  let pinchStartDist = null;
+  let pinchStartBend = 0;
+  let isDragging = false;
+
+  function pointerPos(e){
+    const rect = stage.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+  function getPointersArr(){ return Array.from(pointers.values()); }
+
+  stage.addEventListener('pointerdown', e => {
+    const p = pointerPos(e);
+    pointers.set(e.pointerId, p);
+    if (stage.setPointerCapture) { try { stage.setPointerCapture(e.pointerId); } catch(err){} }
+
+    if (pointers.size === 1) {
+      lastDragY = p.y;
+      isDragging = true;
+      scrollVelocity = 0;
+      velocityHistory = [];
+    } else if (pointers.size === 2) {
+      const arr = getPointersArr();
+      pinchStartDist = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
+      pinchStartBend = bendAmount;
+      isDragging = false;
+    }
+  });
+
+  stage.addEventListener('pointermove', e => {
+    if (!pointers.has(e.pointerId)) return;
+    const p = pointerPos(e);
+    pointers.set(e.pointerId, p);
+
+    if (pointers.size === 1 && isDragging) {
+      if (lastDragY !== null) {
+        const dy = p.y - lastDragY;
+        scrollOffset -= dy;
+        scrollOffset = Math.max(0, Math.min(maxScroll(), scrollOffset));
+        const now = performance.now();
+        velocityHistory.push({ dy: -dy, t: now });
+        // храним только записи за последнее окно времени
+        while (velocityHistory.length && now - velocityHistory[0].t > VELOCITY_WINDOW_MS) {
+          velocityHistory.shift();
+        }
+      }
+      lastDragY = p.y;
+    } else if (pointers.size === 2) {
+      const arr = getPointersArr();
+      const dist = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
+      if (pinchStartDist) {
+        // Снижена чувствительность (делитель больше) — нужно ощутимее развести
+        // пальцы, чтобы получить тот же уровень изгиба; разлёт/возврат спокойнее.
+        const delta = (dist - pinchStartDist) / 340;
+        bendAmount = Math.max(MIN_BEND, Math.min(MAX_BEND, pinchStartBend + delta));
+      }
+    }
+  });
+
+  function release(e){
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinchStartDist = null;
+    if (pointers.size === 0) {
+      // На отпускании считаем итоговую скорость инерции как усреднённую сумму
+      // dy за последнее окно времени, делённую на длительность окна — это
+      // даёт скорость "по ощущению жеста", а не по случайному последнему кадру,
+      // и убирает резкие отлёты на лёгких/медленных свайпах.
+      if (velocityHistory.length >= 2) {
+        const totalDy = velocityHistory.reduce((sum, v) => sum + v.dy, 0);
+        const dt = velocityHistory[velocityHistory.length - 1].t - velocityHistory[0].t;
+        scrollVelocity = dt > 0 ? (totalDy / dt) * 16.67 : 0; // нормируем к "на кадр при 60fps"
+        const MAX_FLING_SPEED = 55; // резвый, но не безумный потолок инерции
+        scrollVelocity = Math.max(-MAX_FLING_SPEED, Math.min(MAX_FLING_SPEED, scrollVelocity));
+      } else {
+        scrollVelocity = 0;
+      }
+      // Лёгкие, медленные движения не должны давать заметный рывок инерции —
+      // приглушаем совсем маленькие скорости до нуля.
+      if (Math.abs(scrollVelocity) < 0.6) scrollVelocity = 0;
+
+      lastDragY = null;
+      isDragging = false;
+      velocityHistory = [];
+    }
+  }
+  stage.addEventListener('pointerup', release);
+  stage.addEventListener('pointercancel', release);
+  stage.addEventListener('pointerleave', release);
+
+  function roundRect(ctx, x, y, w, h, r){
+    r = Math.max(0, Math.min(r, w/2, h/2));
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function anchorX(){ return W / 2; }
+
+  function step(){
+    if (cachedH !== H) rebuildBaseY(); // пересчёт сетки шагов при смене размера экрана
+
+    // Плавно подводим отображаемый изгиб к целевому (от пинча) — без этого
+    // изменение pinch мгновенно меняло бы форму кривой скачком
+    bendAmountDisplay += (bendAmount - bendAmountDisplay) * BEND_EASE;
+    // Медленный фазовый дрейф для "живой", не идеально статичной формы покоя
+    organicTime += ORGANIC_DRIFT_SPEED;
+
+    if (!isDragging) {
+      if (Math.abs(scrollVelocity) > 0.05) {
+        scrollOffset -= scrollVelocity;
+        scrollOffset = Math.max(0, Math.min(maxScroll(), scrollOffset));
+        scrollVelocity *= FRICTION;
+      } else {
+        scrollVelocity = 0;
+      }
+    }
+
+    ctx.clearRect(0, 0, W, H);
+
+    const items = [];
+    for (let i = 0; i < N; i++) {
+      const screenY = TOP_Y + baseY[i] - scrollOffset;
+      if (screenY < -80 || screenY > H + 80) continue;
+
+      const depth = depthFromScreenY(screenY);
+      const sz = sizeForDepth(depth);
+
+      // s — "путь" вдоль X-кривой; используем накопленную baseY как параметр пути,
+      // чтобы зигзаг был привязан к позиции в списке, а не к экранной Y (так при
+      // скролле кривая едет вместе со списком, а не пересчитывается с нуля)
+      const s = baseY[i];
+      const targetX = anchorX() + pathX(s);
+
+      // угол наклона — аналитическая производная (плавно, без заломов)
+      const ampl = curveAmplitude();
+      const freq = curveFreqMul();
+      const dxds = ampl * (1/230) * freq * Math.cos((s/230)*freq + organicTime)
+                 + ampl * 0.22 * (1/115) * freq * Math.cos((s/115)*freq + 1.1 + organicTime * 1.3);
+      // локальный "шаг" по Y между соседями как оценка dy/ds
+      const localStep = i < N - 1 ? Math.max(1, baseY[i+1] - baseY[i]) : Math.max(1, baseY[i] - baseY[i-1]);
+      const dyds = 1; // нормируем: считаем угол относительно вертикального движения вдоль пути
+      let targetAng = Math.atan2(dyds, dxds * (localStep / 60)) - Math.PI / 2;
+      // При увеличении изгиба угол должен расти заметнее — усиливаем нелинейно
+      targetAng *= (0.4 + bendAmountDisplay * 1.3);
+      const MAX_TILT = 1.25; // ~72°, при сильном разлёте карточки могут заметно завалиться
+      targetAng = Math.max(-MAX_TILT, Math.min(MAX_TILT, targetAng));
+
+      // Per-карточный lerp: каждая карточка хранит своё текущее отрисованное
+      // x/angle и плавно (без осцилляций, просто ease) подъезжает к целевому —
+      // при изменении изгиба карточки мягко "доезжают", а не телепортируются.
+      if (displayX[i] === null) {
+        displayX[i] = targetX;
+        displayAng[i] = targetAng;
+      } else {
+        displayX[i] += (targetX - displayX[i]) * POS_EASE;
+        displayAng[i] += (targetAng - displayAng[i]) * POS_EASE;
+      }
+      const x = displayX[i];
+      const ang = displayAng[i];
+
+      // Отсечка по X: карточка, ушедшая далеко за пределы экрана (с запасом
+      // на её собственную ширину), пропускается из отрисовки — она там есть
+      // "логически" (для плавного возврата при ослаблении пинча), просто не рисуется.
+      if (x < -sz.w - 40 || x > W + sz.w + 40) continue;
+
+      const alpha = depth > 0.92 ? Math.max(0, (1 - depth) / 0.08) : 1;
+
+      items.push({ i, x, y: screenY, w: sz.w, h: sz.h, ang, alpha, depth });
+    }
+
+    // Рисуем от мелких/дальних к крупным/близким — крупные верхние перекрывают низ,
+    // но поскольку анти-overlap гарантирует зазор по Y, реального наложения текста не будет
+    items.sort((a, b) => b.depth - a.depth);
+
+    for (const it of items) {
+      const tr = tracks[it.i];
+      ctx.save();
+      ctx.translate(it.x, it.y);
+      ctx.rotate(it.ang);
+      ctx.globalAlpha = it.alpha;
+
+      // Лёгкая подсветка для "основных" (крупных, читаемых) карточек —
+      // мягкое цветное сияние под карточкой, усиливается по мере роста размера.
+      const isMain = it.h > 30;
+      if (isMain) {
+        const glowStrength = Math.min(1, (it.h - 30) / (TOP_H - 30)); // 0..1
+        ctx.save();
+        ctx.shadowColor = tr.color;
+        ctx.shadowBlur = 18 * glowStrength;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.fillStyle = '#22232b';
+        roundRect(ctx, -it.w/2, -it.h/2, it.w, it.h, Math.min(it.h * 0.32, 14));
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.fillStyle = '#22232b';
+      roundRect(ctx, -it.w/2, -it.h/2, it.w, it.h, Math.min(it.h * 0.32, 14));
+      ctx.fill();
+
+      if (it.h > 14) {
+        const coverSize = it.h * 0.86;
+        const coverX = -it.w/2 + it.h * 0.07;
+        const coverY = -coverSize/2;
+        ctx.fillStyle = tr.color;
+        roundRect(ctx, coverX, coverY, coverSize, coverSize, coverSize * 0.22);
+        ctx.fill();
+
+        if (it.h > 30) {
+          const textX = coverX + coverSize + it.h * 0.16;
+          ctx.fillStyle = 'rgba(255,255,255,0.95)';
+          ctx.font = `600 ${Math.round(it.h*0.27)}px -apple-system, sans-serif`;
+          ctx.textBaseline = 'alphabetic';
+          ctx.fillText(tr.title, textX, -it.h*0.06);
+          ctx.fillStyle = 'rgba(255,255,255,0.55)';
+          ctx.font = `400 ${Math.round(it.h*0.22)}px -apple-system, sans-serif`;
+          ctx.fillText(tr.artist, textX, it.h*0.28);
+        }
+      } else {
+        ctx.fillStyle = tr.color;
+        ctx.globalAlpha = it.alpha * 0.9;
+        roundRect(ctx, -it.w/2, -it.h/2, it.w, it.h, it.h * 0.4);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(step);
+  }
+
+  step();
+})();
+</script>
+</body>
+</html>
