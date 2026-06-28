@@ -20,18 +20,7 @@
     height: 100%;
     touch-action: none;
   }
-  #island {
-    position: absolute;
-    top: 16px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 110px;
-    height: 30px;
-    background: #000;
-    border-radius: 16px;
-    z-index: 50;
-    pointer-events: none;
-  }
+ 
   canvas {
     position: absolute;
     inset: 0;
@@ -54,7 +43,7 @@
 </head>
 <body>
   <div id="stage">
-    <div id="island"></div>
+    
     <canvas id="cv" width="2560" height="1305"></canvas>
     <div id="hint">1 палец — скролл · пинч — сильнее изгиб змейки</div>
   </div>
