@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- saved from url=(0045)file:///C:/Users/vhsdo/Downloads/index_2.html -->
+<!-- saved from url=(0045)file:///C:/Users/vhsdo/Downloads/index_3.html -->
 <html lang="ru"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -102,6 +102,15 @@
 
   let tracks = [];
   let N = 0;
+  // displayX/displayAng пересоздаются КАЖДЫЙ раз при смене набора треков
+  // (см. setTracks ниже) — раньше они создавались один раз с длиной N на
+  // момент старта (заглушки, N=14) и не успевали вырасти, когда позже
+  // подгружался настоящий tracks.json с большим N: для индексов за пределами
+  // исходной длины displayX[i] был undefined (не null), ветка инициализации
+  // "displayX[i] === null" не срабатывала, и += давало NaN — карточки с
+  // такими индексами рисовались в NaN-позиции (фактически не видны).
+  let displayX = [];
+  let displayAng = [];
 
   function setTracks(rawTracks){
     tracks = rawTracks.map((t, i) => ({
@@ -111,11 +120,11 @@
       coverUrl: t.coverUrl || null
     }));
     N = tracks.length;
+    displayX = new Array(N).fill(null);
+    displayAng = new Array(N).fill(0);
     rebuildBaseY();
   }
 
-  // Заполняем плейсхолдерами сразу, чтобы лента не была пустой при загрузке
-  setTracksPlaceholder();
   function setTracksPlaceholder(){
     const arr = placeholderTitles.map((title, i) => ({
       title, artist: placeholderArtists[i % placeholderArtists.length], coverUrl: null
@@ -255,7 +264,13 @@
     cachedH = H;
     cachedDepthT = dt;
   }
-  rebuildBaseY();
+  // Заполняем плейсхолдерами здесь (а не в самом начале скрипта) — на этом
+  // месте уже объявлены ВСЕ зависимости (bendAmountDisplay, bendDepthT и
+  // т.д.), которые требуются внутри rebuildBaseY()/sizeForDepth(). Вызов в
+  // самом начале файла обращался к bendAmountDisplay до её объявления через
+  // let — это ReferenceError, который останавливает выполнение всего
+  // скрипта целиком, отчего страница оставалась полностью пустой.
+  setTracksPlaceholder();
 
   function totalSpan(){ return N > 0 ? baseY[N - 1] : 0; }
   function maxScroll(){
@@ -266,8 +281,8 @@
   // у каждой карточки своё "текущее отрисованное" x/angle, которое каждый кадр
   // чуть приближается (ease) к целевому положению на кривой. Это даёт мягкое
   // "доезжание" при изменении изгиба, без скачков и без осцилляций (просто lerp).
-  const displayX = new Array(N).fill(null);
-  const displayAng = new Array(N).fill(0);
+  // (displayX/displayAng объявлены выше, рядом с tracks/N — пересоздаются
+  // вместе при каждой смене набора треков через setTracks)
   const POS_EASE = 0.11; // быстрее доезжают до целевой позиции — реакция резвее
 
   // ---- Зигзаг по X — амплитуда/частота зависят от pinch-зума (см. функции
