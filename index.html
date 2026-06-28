@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- saved from url=(0045)file:///C:/Users/vhsdo/Downloads/index_3.html -->
+<!-- saved from url=(0045)file:///C:/Users/vhsdo/Downloads/index_4.html -->
 <html lang="ru"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -442,6 +442,22 @@
   stage.addEventListener('pointercancel', release);
   stage.addEventListener('pointerleave', release);
 
+  // Обрезает текст с "…" так, чтобы он не выходил за заданную ширину.
+  // Использует ctx.measureText — точнее, чем грубая оценка по числу символов,
+  // т.к. ширина символов разная (например "W" шире "i").
+  function truncateText(ctx, text, maxWidth){
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    let lo = 0, hi = text.length;
+    // двоичный поиск максимальной длины подстроки, которая с "…" укладывается
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const candidate = text.slice(0, mid) + '…';
+      if (ctx.measureText(candidate).width <= maxWidth) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo > 0 ? text.slice(0, lo) + '…' : '…';
+  }
+
   function roundRect(ctx, x, y, w, h, r){
     r = Math.max(0, Math.min(r, w/2, h/2));
     ctx.beginPath();
@@ -622,6 +638,14 @@
       roundRect(ctx, -it.w/2, -it.h/2, it.w, it.h, Math.min(it.h * 0.32, 14));
       ctx.fill();
 
+      // Clip по контуру всей карточки — дополнительная защитная мера: даже
+      // если расчёт обрезки текста окажется неидеальным (разные браузеры
+      // чуть по-разному считают ширину шрифта), текст физически не сможет
+      // нарисоваться за пределами скруглённого прямоугольника карточки.
+      ctx.save();
+      roundRect(ctx, -it.w/2, -it.h/2, it.w, it.h, Math.min(it.h * 0.32, 14));
+      ctx.clip();
+
       if (it.h > 14) {
         const coverSize = it.h * 0.86;
         const coverX = -it.w/2 + it.h * 0.07;
@@ -641,13 +665,19 @@
 
         if (it.h > 30) {
           const textX = coverX + coverSize + it.h * 0.16;
+          // Доступная ширина для текста: от начала текста до правого края
+          // карточки, минус небольшой отступ, чтобы текст не утыкался впритык.
+          const rightPad = it.h * 0.18;
+          const maxTextWidth = Math.max(4, (it.w/2 - rightPad) - textX);
+
           ctx.fillStyle = 'rgba(255,255,255,0.95)';
           ctx.font = `600 ${Math.round(it.h*0.27)}px -apple-system, sans-serif`;
           ctx.textBaseline = 'alphabetic';
-          ctx.fillText(tr.title, textX, -it.h*0.06);
+          ctx.fillText(truncateText(ctx, tr.title, maxTextWidth), textX, -it.h*0.06);
+
           ctx.fillStyle = 'rgba(255,255,255,0.55)';
           ctx.font = `400 ${Math.round(it.h*0.22)}px -apple-system, sans-serif`;
-          ctx.fillText(tr.artist, textX, it.h*0.28);
+          ctx.fillText(truncateText(ctx, tr.artist, maxTextWidth), textX, it.h*0.28);
         }
       } else {
         const coverImg = getCoverImage(tr.coverUrl);
@@ -663,6 +693,8 @@
         }
         ctx.restore();
       }
+
+      ctx.restore(); // закрывает clip всей карточки (добавлен для защиты текста от выхода за края)
 
       ctx.restore();
     }
