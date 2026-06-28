@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- saved from url=(0045)file:///C:/Users/vhsdo/Downloads/index_4.html -->
+<!-- saved from url=(0045)file:///C:/Users/vhsdo/Downloads/index_5.html -->
 <html lang="ru"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -168,7 +168,7 @@
   let bendAmount = 0;
   let bendAmountDisplay = 0;
   const MIN_BEND = 0, MAX_BEND = 2;
-  const BEND_EASE = 0.14; // ещё быстрее догоняет цель — реакция почти мгновенная
+  const BEND_EASE = 0.05; // заметно медленнее догоняет цель — мягкий, плавный изгиб без дёрганости
 
   // Порог начала "углубления" сдвинут раньше (был при bendAmountDisplay>1,
   // т.е. только после полного насыщения bendFold) — теперь мелкие/нижние
@@ -283,7 +283,7 @@
   // "доезжание" при изменении изгиба, без скачков и без осцилляций (просто lerp).
   // (displayX/displayAng объявлены выше, рядом с tracks/N — пересоздаются
   // вместе при каждой смене набора треков через setTracks)
-  const POS_EASE = 0.11; // быстрее доезжают до целевой позиции — реакция резвее
+  const POS_EASE = 0.06; // медленнее доезжают до целевой позиции — спокойный, плавный разлёт
 
   // ---- Зигзаг по X — амплитуда/частота зависят от pinch-зума (см. функции
   // bendFold/bendDepthT, объявленные выше вместе с bendAmount). ----
@@ -394,15 +394,10 @@
       const arr = getPointersArr();
       const dist = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
       if (pinchStartDist) {
-        // Делитель увеличен вдвое вместе с расширением диапазона (MAX_BEND
-        // теперь 2 вместо 1) — чтобы физическое усилие разведения пальцев
-        // на единицу изгиба осталось тем же, что и раньше.
-        // Чувствительность увеличена (делитель меньше) — пинч реагирует резвее
-        // на разведение пальцев, при том же физическом диапазоне разведения.
-        // Чувствительность увеличена ещё раз — даже небольшое разведение
-        // пальцев теперь даёт заметно более сильный изгиб (меньше физического
-        // расстояния нужно пройти пальцами для того же уровня bendAmount).
-        const delta = (dist - pinchStartDist) / 260;
+        // Чувствительность снижена — нужно ощутимее развести пальцы, чтобы
+        // получить заметный изгиб; это вместе с медленным BEND_EASE/POS_EASE
+        // даёт спокойный, плавный разлёт без рывков и дёрганости.
+        const delta = (dist - pinchStartDist) / 420;
         bendAmount = Math.max(MIN_BEND, Math.min(MAX_BEND, pinchStartBend + delta));
       }
       // Зона визуального усиления изгиба следует за пальцами, если они
