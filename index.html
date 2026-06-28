@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<!-- saved from url=(0045)file:///C:/Users/vhsdo/Downloads/index_5.html -->
-<html lang="ru"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Zigzag stack — tracks</title>
 <style>
@@ -20,7 +20,6 @@
     height: 100%;
     touch-action: none;
   }
- 
   canvas {
     position: absolute;
     inset: 0;
@@ -43,8 +42,7 @@
 </head>
 <body>
   <div id="stage">
-    
-    <canvas id="cv" width="2560" height="1305"></canvas>
+    <canvas id="cv"></canvas>
     <div id="hint">1 палец — скролл · пинч — сильнее изгиб змейки</div>
   </div>
 
@@ -106,7 +104,8 @@
       color: palette[i % palette.length],
       title: t.title,
       artist: t.artist,
-      coverUrl: t.coverUrl || null
+      coverUrl: t.coverUrl || null,
+      trackUrl: t.trackUrl || null
     }));
     N = tracks.length;
     displayX = new Array(N).fill(null);
@@ -322,11 +321,24 @@
   const VELOCITY_WINDOW_MS = 60; // усредняем по последним ~60мс движения
 
   // ---- Указатели: drag (1 палец, скролл) + pinch (2 пальца, усиление изгиба) ----
+  // lastDrawnItems — снимок последнего отрисованного кадра (позиция/размер/
+  // угол каждой видимой карточки) — нужен только для определения тапа: при
+  // отпускании пальца проверяем, попадает ли точка тапа в одну из карточек,
+  // используя ИХ ЖЕ геометрию, без отдельного пересчёта.
+  let lastDrawnItems = [];
   const pointers = new Map();
   let lastDragY = null;
   let pinchStartDist = null;
   let pinchStartBend = 0;
   let isDragging = false;
+
+  // Для различения тапа от свайпа: запоминаем точку и время нажатия, и
+  // суммарное пройденное расстояние пальцем — если оно маленькое и палец
+  // отпущен быстро, это тап (а не начало скролла), и можно открыть трек.
+  let tapStartX = 0, tapStartY = 0, tapStartT = 0;
+  let tapTravel = 0;
+  const TAP_MAX_TRAVEL = 12;  // px — больше этого считаем уже свайпом, не тапом
+  const TAP_MAX_DURATION = 400; // ms — дольше этого считаем долгим нажатием, не тапом
 
   function pointerPos(e){
     const rect = stage.getBoundingClientRect();
@@ -344,6 +356,9 @@
       isDragging = true;
       scrollVelocity = 0;
       velocityHistory = [];
+      tapStartX = p.x; tapStartY = p.y;
+      tapStartT = performance.now();
+      tapTravel = 0;
     } else if (pointers.size === 2) {
       const arr = getPointersArr();
       pinchStartDist = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
@@ -378,6 +393,9 @@
           velocityHistory.shift();
         }
       }
+      // Максимальное смещение от стартовой точки нажатия — если оно за всё
+      // время осталось маленьким, при отпускании это будет считаться тапом.
+      tapTravel = Math.max(tapTravel, Math.hypot(p.x - tapStartX, p.y - tapStartY));
       lastDragY = p.y;
     } else if (pointers.size === 2) {
       const arr = getPointersArr();
@@ -397,9 +415,19 @@
   });
 
   function release(e){
+    const wasSinglePointer = pointers.size === 1;
+    const releasedX = pointers.get(e.pointerId) ? pointers.get(e.pointerId).x : null;
+    const releasedY = pointers.get(e.pointerId) ? pointers.get(e.pointerId).y : null;
+
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinchStartDist = null;
     if (pointers.size === 0) {
+      // Определяем тап: палец почти не двигался и был отпущен быстро —
+      // тогда ищем карточку под точкой отпускания и открываем её ссылку.
+      // Проверяем ДО расчёта инерции скролла, тап не должен запускать fling.
+      const tapDuration = performance.now() - tapStartT;
+      const isTap = wasSinglePointer && tapTravel < TAP_MAX_TRAVEL && tapDuration < TAP_MAX_DURATION;
+
       // На отпускании считаем итоговую скорость инерции как усреднённую сумму
       // dy за последнее окно времени, делённую на длительность окна — это
       // даёт скорость "по ощущению жеста", а не по случайному последнему кадру,
@@ -420,11 +448,52 @@
       lastDragY = null;
       isDragging = false;
       velocityHistory = [];
+
+      if (isTap && releasedX !== null) {
+        scrollVelocity = 0; // тап не должен ничего "доскролливать" по инерции
+        handleTap(releasedX, releasedY);
+      }
     }
   }
   stage.addEventListener('pointerup', release);
   stage.addEventListener('pointercancel', release);
   stage.addEventListener('pointerleave', release);
+
+  // Проверяет, попадает ли точка (px,py) в повёрнутую карточку it. Карточка
+  // рисуется как translate(it.x, it.y) + rotate(it.ang) + прямоугольник
+  // [-w/2..w/2] x [-h/2..h/2] — поэтому переводим точку в локальные координаты
+  // карточки обратным поворотом, а потом проверяем как обычный AABB-прямоугольник.
+  function pointInRotatedCard(px, py, it){
+    const dx = px - it.x;
+    const dy = py - it.y;
+    const cos = Math.cos(-it.ang);
+    const sin = Math.sin(-it.ang);
+    const localX = dx * cos - dy * sin;
+    const localY = dx * sin + dy * cos;
+    return Math.abs(localX) <= it.w / 2 && Math.abs(localY) <= it.h / 2;
+  }
+
+  function handleTap(px, py){
+    // Идём от последних (самых "верхних"/крупных, т.к. они рисуются последними
+    // и визуально перекрывают остальные) к первым — так совпадает с тем, что
+    // реально видно на экране при перекрытии.
+    for (let k = lastDrawnItems.length - 1; k >= 0; k--) {
+      const it = lastDrawnItems[k];
+      if (pointInRotatedCard(px, py, it)) {
+        const tr = tracks[it.i];
+        if (tr && tr.trackUrl) {
+          // location.href надёжнее window.open на iOS (особенно в режиме
+          // "На экран домой") — window.open после pointerup может быть
+          // заблокирован как попап, т.к. это не прямой синхронный клик.
+          // open.spotify.com сам по себе Universal Link — iOS предложит
+          // открыть в приложении Spotify, если оно установлено, иначе
+          // просто откроет страницу трека в браузере.
+          window.location.href = tr.trackUrl;
+        }
+        return;
+      }
+    }
+  }
 
   // Обрезает текст с "…" так, чтобы он не выходил за заданную ширину.
   // Использует ctx.measureText — точнее, чем грубая оценка по числу символов,
@@ -594,6 +663,7 @@
     // Рисуем от мелких/дальних к крупным/близким — крупные верхние перекрывают низ,
     // но поскольку анти-overlap гарантирует зазор по Y, реального наложения текста не будет
     items.sort((a, b) => b.depth - a.depth);
+    lastDrawnItems = items; // снимок для определения тапа по координатам (см. handleTap)
 
     for (const it of items) {
       const tr = tracks[it.i];
@@ -690,6 +760,5 @@
   step();
 })();
 </script>
-
-
-</body></html>
+</body>
+</html>
